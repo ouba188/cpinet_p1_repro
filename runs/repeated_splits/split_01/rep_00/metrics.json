@@ -1,0 +1,37 @@
+{
+  "seed": 200,
+  "best_val_acc": 0.8888888888888888,
+  "test": {
+    "loss": 0.38617850314168367,
+    "acc": 0.8382352941176471,
+    "macro_f1": 0.806652652051425
+  },
+  "args": {
+    "train_csv": "splits/repeated_5/split_01/train.csv",
+    "val_csv": "splits/repeated_5/split_01/val.csv",
+    "test_csv": "splits/repeated_5/split_01/test.csv",
+    "out_dir": "runs/cpinet_p1",
+    "run_dir": "runs/repeated_splits/split_01/rep_00",
+    "save_json": true,
+    "epochs": 300,
+    "batch": 64,
+    "workers": 4,
+    "imgsz": 64,
+    "num_classes": 3,
+    "loss_balance": "gradnorm",
+    "gradnorm_alpha": 1.5,
+    "label_smoothing": 0.0,
+    "fbc_k": 2048,
+    "fbc_lam": 0.001,
+    "fuse_ch": 128,
+    "embed_dim": 1024,
+    "gbp_groups": 3,
+    "dropout": 0.0,
+    "assemble": "logit_mean",
+    "lr": 0.0003,
+    "wd": 0.01,
+    "device": "cuda:0",
+    "seed": 200,
+    "no_aug": false
+  }
+}

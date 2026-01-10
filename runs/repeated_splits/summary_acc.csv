@@ -1,0 +1,9 @@
+split,median,repeats
+split_00,0.852941,3
+split_01,0.838235,3
+split_02,0.827206,3
+split_03,0.860294,3
+split_04,0.812500,3
+
+mean,0.838235
+std,0.017244
