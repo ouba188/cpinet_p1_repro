@@ -8,17 +8,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    """Resize x spatially to ref using safe ops (avgpool for down, bilinear for up)."""
+def _max_pool_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Downsample x to ref size using max pooling where possible."""
     H, W = ref.shape[-2:]
     h, w = x.shape[-2:]
     if h == H and w == W:
         return x
-    # downsample: use adaptive avgpool to avoid aliasing
-    if h > H or w > W:
-        return F.adaptive_avg_pool2d(x, output_size=(H, W))
-    # upsample
-    return F.interpolate(x, size=(H, W), mode="bilinear", align_corners=False)
+    if h < H or w < W:
+        return F.interpolate(x, size=(H, W), mode="bilinear", align_corners=False)
+    scale_h = max(1, h // H)
+    scale_w = max(1, w // W)
+    if h % H == 0 and w % W == 0 and scale_h == scale_w:
+        return F.max_pool2d(x, kernel_size=scale_h, stride=scale_h)
+    return F.adaptive_max_pool2d(x, output_size=(H, W))
+
+
+def _ensure_size(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    if x.shape[-2:] == ref.shape[-2:]:
+        return x
+    return F.interpolate(x, size=ref.shape[-2:], mode="bilinear", align_corners=False)
 
 
 class Conv1x1BNReLU(nn.Module):
@@ -39,9 +47,11 @@ class IMDFF(nn.Module):
       Eq(2): FMS = f1x1(Concat[MaxPool2(F'_DB3), F'_DB4])  (DB34 fusion)
     We implement fused maps for DB3/DB4/DB5 plus FMS.
     """
-    def __init__(self, chs: Dict[str, int], fuse_ch: int = 128):
+    def __init__(self, chs: Dict[str, int], fuse_ch: int = 128, use_fms: bool = True, use_db5_fusion: bool = True):
         super().__init__()
         self.chs = chs
+        self.use_fms = use_fms
+        self.use_db5_fusion = use_db5_fusion
         # DB3 fusion: concat of 4 resized feature maps -> fuse_ch -> residual add to DB3
         in3 = chs["db1"] + chs["db2"] + chs["db4"] + chs["db5"]
         self.fuse3 = Conv1x1BNReLU(in3, fuse_ch)
@@ -61,28 +71,50 @@ class IMDFF(nn.Module):
         self.fms_fuse = Conv1x1BNReLU(chs["db3"] + chs["db4"], fuse_ch)
         self.fms_proj = nn.Conv2d(fuse_ch, fuse_ch, kernel_size=1, bias=False)
 
+        self.up_db4_to_db3 = nn.ConvTranspose2d(chs["db4"], chs["db4"], kernel_size=2, stride=2, bias=False)
+        self.up_db5_to_db3 = nn.ConvTranspose2d(chs["db5"], chs["db5"], kernel_size=4, stride=4, bias=False)
+        self.up_db5_to_db4 = nn.ConvTranspose2d(chs["db5"], chs["db5"], kernel_size=2, stride=2, bias=False)
+
     def forward(self, feats: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         db1, db2, db3, db4, db5 = feats["db1"], feats["db2"], feats["db3"], feats["db4"], feats["db5"]
 
         # DB3'
-        cat3 = torch.cat([_resize_to(db1, db3), _resize_to(db2, db3), _resize_to(db4, db3), _resize_to(db5, db3)], dim=1)
+        db1_ds = _max_pool_to(db1, db3)
+        db2_ds = _max_pool_to(db2, db3)
+        db4_us = _ensure_size(self.up_db4_to_db3(db4), db3)
+        db5_us = _ensure_size(self.up_db5_to_db3(db5), db3)
+        cat3 = torch.cat([db1_ds, db2_ds, db4_us, db5_us], dim=1)
         r3 = self.proj3(self.fuse3(cat3))
         db3p = db3 + r3
 
         # DB4'
-        cat4 = torch.cat([_resize_to(db1, db4), _resize_to(db2, db4), _resize_to(db3, db4), _resize_to(db5, db4)], dim=1)
+        db1_ds = _max_pool_to(db1, db4)
+        db2_ds = _max_pool_to(db2, db4)
+        db3_ds = _max_pool_to(db3, db4)
+        db5_us = _ensure_size(self.up_db5_to_db4(db5), db4)
+        cat4 = torch.cat([db1_ds, db2_ds, db3_ds, db5_us], dim=1)
         r4 = self.proj4(self.fuse4(cat4))
         db4p = db4 + r4
 
         # DB5'
-        cat5 = torch.cat([_resize_to(db1, db5), _resize_to(db2, db5), _resize_to(db3, db5), _resize_to(db4, db5)], dim=1)
-        r5 = self.proj5(self.fuse5(cat5))
-        db5p = db5 + r5
+        if self.use_db5_fusion:
+            db1_ds = _max_pool_to(db1, db5)
+            db2_ds = _max_pool_to(db2, db5)
+            db3_ds = _max_pool_to(db3, db5)
+            db4_ds = _max_pool_to(db4, db5)
+            cat5 = torch.cat([db1_ds, db2_ds, db3_ds, db4_ds], dim=1)
+            r5 = self.proj5(self.fuse5(cat5))
+            db5p = db5 + r5
+        else:
+            db5p = db5
 
         # FMS: maxpool2(DB3') -> concat with DB4' -> f1x1
-        db3p_ds = F.max_pool2d(db3p, kernel_size=2, stride=2)
-        db3p_ds = _resize_to(db3p_ds, db4p)  # robust if odd sizes
-        fms = self.fms_proj(self.fms_fuse(torch.cat([db3p_ds, db4p], dim=1)))
+        if self.use_fms:
+            db3p_ds = F.max_pool2d(db3p, kernel_size=2, stride=2)
+            db3p_ds = _ensure_size(db3p_ds, db4p)  # robust if odd sizes
+            fms = self.fms_proj(self.fms_fuse(torch.cat([db3p_ds, db4p], dim=1)))
+        else:
+            fms = db4p
 
         return {"db3p": db3p, "db4p": db4p, "db5p": db5p, "fms": fms}
 
@@ -223,3 +255,45 @@ class MOSE(nn.Module):
         f_vh_aug = (f_vh + s_gap_vv4) * s_gbp_vv4
         f_vv_aug = (f_vv + s_gap_vh4) * s_gbp_vh4
         return f_vh_aug, f_vv_aug
+
+
+class SEBlock(nn.Module):
+    def __init__(self, ch: int, reduction: int = 16):
+        super().__init__()
+        hid = max(8, ch // reduction)
+        self.fc1 = nn.Linear(ch, hid, bias=False)
+        self.bn1 = nn.BatchNorm1d(hid)
+        self.fc2 = nn.Linear(hid, ch, bias=False)
+        self.bn2 = nn.BatchNorm1d(ch)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        s = torch.mean(x, dim=(2, 3))
+        s = self.fc1(s)
+        s = self.bn1(s)
+        s = F.relu(s, inplace=True)
+        s = self.fc2(s)
+        s = self.bn2(s)
+        s = torch.sigmoid(s)
+        return x * s[:, :, None, None]
+
+
+class CBAM(nn.Module):
+    def __init__(self, ch: int, reduction: int = 16, spatial_kernel: int = 7):
+        super().__init__()
+        hid = max(8, ch // reduction)
+        self.mlp = nn.Sequential(
+            nn.Linear(ch, hid, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hid, ch, bias=False),
+        )
+        self.spatial = nn.Conv2d(2, 1, kernel_size=spatial_kernel, padding=spatial_kernel // 2, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gap = torch.mean(x, dim=(2, 3))
+        gmp = torch.amax(x, dim=(2, 3))
+        ch_att = torch.sigmoid(self.mlp(gap) + self.mlp(gmp))
+        x = x * ch_att[:, :, None, None]
+        avg = torch.mean(x, dim=1, keepdim=True)
+        mx = torch.amax(x, dim=1, keepdim=True)
+        sp_att = torch.sigmoid(self.spatial(torch.cat([avg, mx], dim=1)))
+        return x * sp_att

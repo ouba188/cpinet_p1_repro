@@ -1,0 +1,1726 @@
+diff --git a/README.md b/README.md
+index 6f8851d7bd8112ad40ea11b71ca357e94bb1c162..f8110faa858de00fc01f4b995789d32f60df1c96 100644
+--- a/README.md
++++ b/README.md
+@@ -1,49 +1,192 @@
+ 
+ # CPINet P1 Reproduction (Dual-Polarized SAR Ship Classification)
+ 
+ This package reproduces the **P1** stage of CPINet (Remote Sensing 2024):
+ - SAR-DenseNet-v1 backbone (two towers: VH / VV)
+ - IMDFF (Eq.1-2): multiscale fusion + DB34 fusion feature maps
+ - MO-SE: mixed-order SE augmentation (GAP + GBP) with cross-pol transfer
+ - FBC pooling (Eq.6-7): factorized bilinear coding + soft-threshold + spatial max
+ - 4 branches: DB34 / MO-SE / DB5-VH / DB5-VV
+ - Loss balancing: SUM or GradNorm (adaptive)
+ 
+ ## 1) Prepare paired CSV
+ Use your existing folder structure (vv_root / vh_root with class folders).
+ 
+ ```bash
+ python prepare_pairs_index.py \
+   --vv_root /path/to/cls_vv \
+   --vh_root /path/to/cls_vh \
+   --out_dir pairs_csv
+ ```
+ 
+ It will output `pairs_csv/train.csv`, `pairs_csv/val.csv`, `pairs_csv/test.csv`.
+ 
+-## 2) Train
++### Paper datasets
++Five-class dataset (OpenSARShip 5C):
++```bash
++python prepare_pairs_index.py \
++  --vv_root /root/private_data/cpinet_pairs/vv \
++  --vh_root /root/private_data/cpinet_pairs/vh \
++  --out_dir pairs_csv_5c
++```
++
++Three-class dataset (OpenSARShip 3C):
++```bash
++python prepare_pairs_index.py \
++  --vv_root /root/private_data/cls_vv \
++  --vh_root /root/private_data/cls_vh \
++  --out_dir pairs_csv_3c
++```
++
++## 2) Train (paper default)
+ ```bash
+ python train_cpinet.py \
+   --train_csv pairs_csv/train.csv \
+   --val_csv pairs_csv/val.csv \
+   --test_csv pairs_csv/test.csv \
+   --out_dir runs/cpinet_p1 \
+   --num_classes 3 \
+   --imgsz 64 \
+-  --batch 64 \
++  --batch 32 \
+   --loss_balance gradnorm \
++  --optimizer sgd \
++  --lr 0.01 \
++  --momentum 0.9 \
++  --wd 5e-4 \
++  --dropout 0.2 \
+   --fbc_k 2048 \
+   --fbc_lam 1e-3
+ ```
+ 
+ Switch to simple sum:
+ ```bash
+ --loss_balance sum
+ ```
+ 
++## 3) Ablation configs (Section 4.5)
++Below are CLI switches that map to the paper ablations:
++
++| Ablation | CLI switches |
++| --- | --- |
++| w/ MSDFF | `--fusion msdff --db34_source db4p` |
++| w/ FBC (vs GBP) | `--pooling fbc` (use `--pooling gbp --no_share_head` as baseline) |
++| w/ IMDFF | `--fusion imdff --db34_source fms` |
++| w/ CBAM | `--attention cbam` |
++| w/ SE | `--attention se` |
++| w/ MO-SE | `--attention mose` |
++| w/ GradNorm | `--loss_balance gradnorm` (baseline: `--loss_balance sum`) |
++
++Example (SE ablation):
++```bash
++python train_cpinet.py \
++  --train_csv pairs_csv/train.csv \
++  --val_csv pairs_csv/val.csv \
++  --out_dir runs/ablation_se \
++  --attention se \
++  --loss_balance sum
++```
++
++## 4) Sensitivity curves (Section 4.4)
++Run separate experiments with different `--fbc_k` and `--fbc_lam`, then plot:
++```bash
++python plot_paper_figures.py \
++  --k_runs runs/k_1024 runs/k_2048 runs/k_4096 \
++  --k_labels k=1024 k=2048 k=4096 \
++  --lam_runs runs/lam_1e-2 runs/lam_1e-3 runs/lam_1e-4 \
++  --lam_labels lam=0.01 lam=0.001 lam=0.0001 \
++  --metric val_acc \
++  --out_dir runs/plots
++```
++
++## 5) GradNorm curves (Section 4.5 Figure 7)
++```bash
++python plot_paper_figures.py \
++  --gradnorm_run runs/cpinet_p1 \
++  --out_dir runs/plots
++```
++
++## 6) Extra evaluation (Section 4.6)
++Generate confusion matrix + Grad-CAM visualizations:
++```bash
++python eval_cpinet.py \
++  --test_csv pairs_csv/test.csv \
++  --checkpoint runs/cpinet_p1/best.pt \
++  --out_dir runs/eval_cpinet \
++  --num_classes 3
++```
++Single-pol evaluation (Table 7 style):
++```bash
++python eval_cpinet.py \
++  --test_csv pairs_csv/test.csv \
++  --checkpoint runs/cpinet_p1/best.pt \
++  --out_dir runs/eval_vh \
++  --num_classes 3 \
++  --input_mode vh
++```
++
++## 7) Paper table alignment (runs for Tables 4–8)
++
++### Table 4/5 (SOTA comparison, CPINet results for 3C/5C)
++```bash
++# 3-class CPINet
++python train_cpinet.py \
++  --train_csv pairs_csv_3c/train.csv \
++  --val_csv pairs_csv_3c/val.csv \
++  --test_csv pairs_csv_3c/test.csv \
++  --out_dir runs/cpinet_3c \
++  --num_classes 3
++
++# 5-class CPINet
++python train_cpinet.py \
++  --train_csv pairs_csv_5c/train.csv \
++  --val_csv pairs_csv_5c/val.csv \
++  --test_csv pairs_csv_5c/test.csv \
++  --out_dir runs/cpinet_5c \
++  --num_classes 5
++```
++
++### Table 6 (ablation study, 3C)
++```bash
++# w/ MSDFF
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --out_dir runs/ablation_msdff --num_classes 3 --fusion msdff --db34_source db4p --loss_balance sum
++# w/ FBC (use GBP baseline if needed)
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --out_dir runs/ablation_fbc --num_classes 3 --pooling fbc --loss_balance sum
++# w/ IMDFF
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --out_dir runs/ablation_imdff --num_classes 3 --fusion imdff --db34_source fms --loss_balance sum
++# w/ CBAM
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --out_dir runs/ablation_cbam --num_classes 3 --attention cbam --loss_balance sum
++# w/ SE
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --out_dir runs/ablation_se --num_classes 3 --attention se --loss_balance sum
++# w/ MO-SE
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --out_dir runs/ablation_mose --num_classes 3 --attention mose --loss_balance sum
++# w/ GradNorm
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --out_dir runs/ablation_gradnorm --num_classes 3 --loss_balance gradnorm
++```
++
++### Table 7 (single-pol vs dual-pol effectiveness)
++```bash
++# Backbone single-pol (VH)
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --test_csv pairs_csv_3c/test.csv --out_dir runs/backbone_vh --num_classes 3 --model backbone --input_mode vh
++
++# Backbone single-pol (VV)
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --test_csv pairs_csv_3c/test.csv --out_dir runs/backbone_vv --num_classes 3 --model backbone --input_mode vv
++
++# GBCNN dual-pol
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --test_csv pairs_csv_3c/test.csv --out_dir runs/gbcnn --num_classes 3 --model gbcnn
++
++# CPINet dual-pol
++python train_cpinet.py --train_csv pairs_csv_3c/train.csv --val_csv pairs_csv_3c/val.csv --test_csv pairs_csv_3c/test.csv --out_dir runs/cpinet_3c --num_classes 3
++```
++
++### Table 8 / Section 4.6 (confusion matrix + Grad-CAM)
++```bash
++python eval_cpinet.py --test_csv pairs_csv_3c/test.csv --checkpoint runs/cpinet_3c/best.pt --out_dir runs/eval_3c --num_classes 3
++python eval_cpinet.py --test_csv pairs_csv_5c/test.csv --checkpoint runs/cpinet_5c/best.pt --out_dir runs/eval_5c --num_classes 5
++```
++
+ 
+ ## Repeated random splits (paper-style protocol)
+ 
+ Use `cv/` scripts to reproduce 5 random splits × 3 repeats, then report mean±std over split-wise medians.
+ 
+ See `cv/make_repeated_splits.py`, `cv/run_repeated_splits.py`, `cv/summarize_repeated.py`.
+diff --git a/__pycache__/dualpol_dataset.cpython-310.pyc b/__pycache__/dualpol_dataset.cpython-310.pyc
+deleted file mode 100644
+index fb63860e031a2c2e39152c8a46afaaca720b26dd..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 3717
+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
+Be=h(4
+
+diff --git a/__pycache__/utils_metrics.cpython-310.pyc b/__pycache__/utils_metrics.cpython-310.pyc
+deleted file mode 100644
+index 1fcdfc7321629eb3f56f55b131f67f26b5fda340..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 1276
+zcmZ8gOK%)S5bo#9`mwQNR>n!B2oi*}hs26Na0v*B95^6f$Y}*yM$<h@FY`)uPvnhe
+zC6Kx1jF32Zk6idceT9qp35Ww#V;h<DsK4&6Ds@+V^-VJ#Z!;W!F28l}E5`ny!_6_m
+z!)G}C4+w@CUb2eMcqL|{k~7K4CQ3Ea!<x(zBW<!wjT%tfQIVL$q(7<ImKoV?vt{*i
+z$7~O%35${0F}vvBHRCHQx5KUwcUYm!EwhK-TSk1vru!F|1)IvKp1C|k^`-M6>gQcs
+z+LM@+&B6sA`6?!0LkD#(DEw+jTxoue)4zw%vnAGJ#B075f%l^4--~m;Vdny;+^{o_
+zFUpe(j<Hi7rE%3%#Uz78m7PXilud>yR5q)la=}(p2^vEoL5QjaYkp&}hljsEIEJPP
+z$1S**S+H}Hh3q(QU2Vg>eKH5zLUY^&SNeHn1GwBjZdY*}8gyoP-a(eHQoP4wgV-)V
+z;&7Xu*r~f}o|l>T*2iQu571d!>E)a%y&jYhWj0j)1#SXc@*e9i1nz|4uf<vh*&_#M
+z;u-tq;A^o~Yu(GBdUeJT^%*aOW_PgHA0vrR*^9ki4(uQ?+JseWfs``UQPgeJuPih^
+zYFCGkK8*5}Yoo;dG=T#Qg0~1J2vOu!<RS8Q;OP?f$+4d|b<ug()blDsN=|pt>gkCI
+zKj8Pd;&2}ia1SA;23-#dp?Zf}f5%N==UD58pHr=J!`FCPs>{A#+j@S))?%<r(!>Ak
+z$P3<~iJiBZQHE{gJ+@Z=S>+9@Ho8|6*6Rtqi~C;R@Fs7(kYF|`#q>#^n&el7jHV}W
+zr8kwGIzO<wxc%3oAAkAz#U~e}XVl;pwm5gh4k<m)$})=LNlbm$whe@73WpdNm2ueu
+z1?#ClF&zX;{qS8CRbILlj_AJ8z+x1k#an3B@Gjcn0l`B8`di-Y&=^~OsXi23K`r%k
+z+krSjfgXxOY|?}aDL8$}Kkx{h)4iBrF0NhxRRSbZAW=t+T5eaDY3tBH{#{I-+uAn(
+zI}}8Mhr1M+)+PhURzv@>mH@-mH`1eD4h9vCo>q<NO8Y5M>PbQqKEm&=d`CY>{{^=^
+BDuw_6
+
+diff --git a/eval_cpinet.py b/eval_cpinet.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1634a6bac1e620018161e8164b4486fb10ff976
+--- /dev/null
++++ b/eval_cpinet.py
+@@ -0,0 +1,239 @@
++# eval_cpinet.py
++import argparse
++import json
++from pathlib import Path
++from typing import Dict, Tuple
++
++import matplotlib.pyplot as plt
++import numpy as np
++import torch
++from torch.utils.data import DataLoader
++
++from dualpol_dataset import DualPolCSVDataset, AugCfg
++from models.cpinet_p1 import CPINetP1
++from models.cpinet_baselines import BackboneNet, GBCNN
++from utils_metrics import confusion_matrix, per_class_prf
++
++
++def load_label2id(path: Path) -> Dict[str, int]:
++    import json
++    return json.loads(path.read_text(encoding="utf-8"))
++
++
++def build_model_from_args(args: argparse.Namespace, ckpt_args: Dict[str, object]) -> torch.nn.Module:
++    model_type = ckpt_args.get("model", args.model)
++    if model_type == "backbone":
++        model = BackboneNet(
++            num_classes=args.num_classes,
++            embed_dim=int(ckpt_args.get("embed_dim", args.embed_dim)),
++            dropout=float(ckpt_args.get("dropout", args.dropout)),
++        )
++        model.input_mode = ckpt_args.get("input_mode", args.input_mode)
++        return model
++    if model_type == "gbcnn":
++        model = GBCNN(
++            num_classes=args.num_classes,
++            gbp_groups=int(ckpt_args.get("gbp_groups", args.gbp_groups)),
++            embed_dim=int(ckpt_args.get("embed_dim", args.embed_dim)),
++            dropout=float(ckpt_args.get("dropout", args.dropout)),
++        )
++        model.input_mode = "dual"
++        return model
++    model = CPINetP1(
++        num_classes=args.num_classes,
++        fuse_ch=int(ckpt_args.get("fuse_ch", args.fuse_ch)),
++        fbc_k=int(ckpt_args.get("fbc_k", args.fbc_k)),
++        fbc_lam=float(ckpt_args.get("fbc_lam", args.fbc_lam)),
++        embed_dim=int(ckpt_args.get("embed_dim", args.embed_dim)),
++        gbp_groups=int(ckpt_args.get("gbp_groups", args.gbp_groups)),
++        dropout=float(ckpt_args.get("dropout", args.dropout)),
++        assemble=str(ckpt_args.get("assemble", args.assemble)),
++        fusion=str(ckpt_args.get("fusion", args.fusion)),
++        attention=str(ckpt_args.get("attention", args.attention)),
++        pooling=str(ckpt_args.get("pooling", args.pooling)),
++        share_head=bool(ckpt_args.get("share_head", True)),
++        db34_source=str(ckpt_args.get("db34_source", args.db34_source)),
++    )
++    model.input_mode = ckpt_args.get("input_mode", args.input_mode)
++    return model
++
++
++class GradCAM:
++    def __init__(self, model: torch.nn.Module, target_layer: torch.nn.Module):
++        self.model = model
++        self.target_layer = target_layer
++        self.activations = None
++        self.gradients = None
++        self.hook_handles = []
++        self._register_hooks()
++
++    def _register_hooks(self) -> None:
++        def forward_hook(_, __, output):
++            self.activations = output.detach()
++
++        def backward_hook(_, grad_in, grad_out):
++            self.gradients = grad_out[0].detach()
++
++        self.hook_handles.append(self.target_layer.register_forward_hook(forward_hook))
++        self.hook_handles.append(self.target_layer.register_full_backward_hook(backward_hook))
++
++    def close(self) -> None:
++        for h in self.hook_handles:
++            h.remove()
++
++    def __call__(self, logits: torch.Tensor, class_idx: torch.Tensor) -> torch.Tensor:
++        self.model.zero_grad(set_to_none=True)
++        score = logits.gather(1, class_idx[:, None]).sum()
++        score.backward(retain_graph=True)
++        weights = torch.mean(self.gradients, dim=(2, 3), keepdim=True)
++        cam = torch.sum(weights * self.activations, dim=1)
++        cam = torch.relu(cam)
++        cam = cam - cam.min(dim=1, keepdim=True)[0]
++        cam = cam / (cam.max(dim=1, keepdim=True)[0] + 1e-12)
++        return cam
++
++
++def plot_confusion(cm: np.ndarray, labels: Tuple[str, ...], out_path: Path) -> None:
++    fig, ax = plt.subplots(figsize=(6, 5))
++    im = ax.imshow(cm, cmap="Greys")
++    ax.set_xticks(range(len(labels)))
++    ax.set_yticks(range(len(labels)))
++    ax.set_xticklabels(labels, rotation=45, ha="right")
++    ax.set_yticklabels(labels)
++    for i in range(cm.shape[0]):
++        for j in range(cm.shape[1]):
++            ax.text(j, i, str(cm[i, j]), ha="center", va="center", color="tab:green" if i == j else "black")
++    ax.set_xlabel("Predicted")
++    ax.set_ylabel("True")
++    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
++    fig.tight_layout()
++    fig.savefig(out_path, dpi=200)
++    plt.close(fig)
++
++
++def overlay_cam(img: np.ndarray, cam: np.ndarray) -> np.ndarray:
++    cmap = plt.get_cmap("jet")
++    heat = cmap(cam)[:, :, :3]
++    overlay = 0.6 * img[:, :, None] + 0.4 * heat
++    return np.clip(overlay, 0.0, 1.0)
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--test_csv", type=str, required=True)
++    ap.add_argument("--checkpoint", type=str, required=True)
++    ap.add_argument("--label2id", type=str, default=None, help="Optional label2id.json path.")
++    ap.add_argument("--out_dir", type=str, default="runs/eval")
++    ap.add_argument("--num_classes", type=int, default=3)
++    ap.add_argument("--batch", type=int, default=64)
++    ap.add_argument("--imgsz", type=int, default=64)
++    ap.add_argument("--device", type=str, default="cuda:0")
++    ap.add_argument("--model", type=str, default="cpinet", choices=["cpinet", "backbone", "gbcnn"])
++    ap.add_argument("--input_mode", type=str, default="dual", choices=["dual", "vh", "vv"])
++    ap.add_argument("--cam_layer", type=str, default="vh", choices=["vh", "vv"])
++    ap.add_argument("--cam_samples", type=int, default=8)
++    ap.add_argument("--fuse_ch", type=int, default=128)
++    ap.add_argument("--fbc_k", type=int, default=2048)
++    ap.add_argument("--fbc_lam", type=float, default=1e-3)
++    ap.add_argument("--embed_dim", type=int, default=1024)
++    ap.add_argument("--gbp_groups", type=int, default=3)
++    ap.add_argument("--dropout", type=float, default=0.2)
++    ap.add_argument("--assemble", type=str, default="logit_mean")
++    ap.add_argument("--fusion", type=str, default="imdff")
++    ap.add_argument("--attention", type=str, default="mose")
++    ap.add_argument("--pooling", type=str, default="fbc")
++    ap.add_argument("--db34_source", type=str, default="fms")
++
++    args = ap.parse_args()
++    device = args.device if torch.cuda.is_available() else "cpu"
++    out_dir = Path(args.out_dir)
++    out_dir.mkdir(parents=True, exist_ok=True)
++
++    ckpt = torch.load(args.checkpoint, map_location=device)
++    ckpt_args = ckpt.get("args", {})
++    model = build_model_from_args(args, ckpt_args).to(device)
++    model.load_state_dict(ckpt["model"], strict=True)
++    model.eval()
++
++    label2id_path = Path(args.label2id) if args.label2id else Path(args.checkpoint).parent / "label2id.json"
++    label2id = load_label2id(label2id_path)
++    id2label = {v: k for k, v in label2id.items()}
++
++    ds = DualPolCSVDataset(args.test_csv, label2id, img_size=args.imgsz, aug=AugCfg(enable=False))
++    dl = DataLoader(ds, batch_size=args.batch, shuffle=False)
++
++    ys, ps = [], []
++    for x_vv, x_vh, y in dl:
++        x_vv = x_vv.to(device)
++        x_vh = x_vh.to(device)
++        y = y.to(device)
++        if getattr(model, "input_mode", "dual") == "vh":
++            logits, _ = model(x_vh)
++        elif getattr(model, "input_mode", "dual") == "vv":
++            logits, _ = model(x_vv)
++        else:
++            logits, _ = model(x_vh, x_vv)
++        pred = logits.argmax(dim=1).detach().cpu().numpy()
++        ys.append(y.detach().cpu().numpy())
++        ps.append(pred)
++
++    y_true = np.concatenate(ys, axis=0)
++    y_pred = np.concatenate(ps, axis=0)
++    cm = confusion_matrix(args.num_classes, y_true, y_pred)
++    prf = per_class_prf(cm)
++    oa = float((y_true == y_pred).mean()) if len(y_true) else 0.0
++    macro_p = float(np.mean(prf["precision"])) if cm.sum() else 0.0
++    macro_r = float(np.mean(prf["recall"])) if cm.sum() else 0.0
++    macro_f1 = float(np.mean(prf["f1"])) if cm.sum() else 0.0
++    np.save(out_dir / "confusion.npy", cm)
++    labels = tuple(id2label[i] for i in range(args.num_classes))
++    plot_confusion(cm, labels, out_dir / "confusion_matrix.png")
++    np.savez(out_dir / "per_class_prf.npz", **prf)
++    metrics = {
++        "oa": oa,
++        "macro_p": macro_p,
++        "macro_r": macro_r,
++        "macro_f1": macro_f1,
++        "num_classes": args.num_classes,
++        "input_mode": getattr(model, "input_mode", "dual"),
++        "model": ckpt_args.get("model", args.model),
++    }
++    (out_dir / "metrics.json").write_text(
++        json.dumps(metrics, ensure_ascii=False, indent=2),
++        encoding="utf-8"
++    )
++
++    if isinstance(model, BackboneNet):
++        cam_layer = model.backbone.db5
++    elif isinstance(model, GBCNN):
++        cam_layer = model.bb_vh.db5 if args.cam_layer == "vh" else model.bb_vv.db5
++    else:
++        cam_layer = model.bb_vh.db5 if args.cam_layer == "vh" else model.bb_vv.db5
++    grad_cam = GradCAM(model, cam_layer)
++    cam_out = out_dir / "gradcam"
++    cam_out.mkdir(parents=True, exist_ok=True)
++
++    loader = DataLoader(ds, batch_size=1, shuffle=False)
++    for idx, (x_vv, x_vh, y) in enumerate(loader):
++        if idx >= args.cam_samples:
++            break
++        x_vv = x_vv.to(device)
++        x_vh = x_vh.to(device)
++        if getattr(model, "input_mode", "dual") == "vh":
++            logits, _ = model(x_vh)
++        elif getattr(model, "input_mode", "dual") == "vv":
++            logits, _ = model(x_vv)
++        else:
++            logits, _ = model(x_vh, x_vv)
++        pred = logits.argmax(dim=1)
++        cam = grad_cam(logits, pred)[0].cpu().numpy()
++        img = x_vh[0, 0].cpu().numpy() if args.cam_layer == "vh" else x_vv[0, 0].cpu().numpy()
++        img = (img - img.min()) / (img.max() - img.min() + 1e-12)
++        overlay = overlay_cam(img, cam)
++        plt.imsave(cam_out / f"cam_{idx:03d}.png", overlay)
++
++    grad_cam.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/models/__pycache__/__init__.cpython-310.pyc b/models/__pycache__/__init__.cpython-310.pyc
+deleted file mode 100644
+index 8e7589e32458209fc432a76010888d39d7450446..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 146
+zcmd1j<>g`kf+txCnSwz2F^Gc<7=auIATDMB5-AM944RC7D;bJF!U*D*seVy@eu;iT
+zQD#|UNossbVo9QYazSQZYDs*7VSG_)K~cVbZhlH?PO*M`d}dx|NqoFsLFFwD8=zom
+PPO2TqxMC(C!NLFl)h8i~
+
+diff --git a/models/__pycache__/cpin_blocks.cpython-310.pyc b/models/__pycache__/cpin_blocks.cpython-310.pyc
+deleted file mode 100644
+index e943bed72415cf9581d52e4bbd1a6660caef4020..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 8315
+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
+
+diff --git a/models/__pycache__/cpinet_p1.cpython-310.pyc b/models/__pycache__/cpinet_p1.cpython-310.pyc
+deleted file mode 100644
+index 8fc7a7af443f7e5a3492d70538960825bdf1e71b..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 4262
+zcmZ`+-E-T<5yt@_2!f<U(Td}IOp3%#Y_^shC3ey#j?>z*<FuBdMvgjz#6>^?q$uNq
+zK7g#P0cV=AXOcd+GkxlGrVmoz{O|PfUi*-`Z++>5o5}RI2a;mqh8it)_x28Zce}q`
+zB=x$b;J5zm=l#=7MfnE_^FJNJ&lQEGe+1(zJ`0tIIgAmnhH9iaTBJLARB}pEr-g=N
+zU`z|kk?EKdT_rMAg(;EcRH4!RQdo=XPF?awxDYKmi&4XAL`%*RQ$A4qvTr_6d^0fj
+zn)fy57&H~%g2tL?mVIqoX;mMSr!6L`UK}Txm-Ul4ZD~SZ?{_j$x;Y$#fzWUC(`@rG
+zD=h2Vzxa4Ph|^#*$adCXTl#Qg{n|C5Z+x_URan<9U)f5Mupjq2wDkP1R0u5nF_=Jc
+zn6Eghzvwr<RJzPJ{mO&7qxnmI-CuZs1Nl<X6{iFzo1)}i4?O?t>0-j@$FARxgw~HU
+zQ3;}U;7hq04<ok|dTAP@qU`fzkPNYnZkTvkXYzWv2=ONVHM*BAFqv{+Iber4;Y>Zy
+zGIdYSS+4rbS06$;DCO!QgVyjhUw=qkImaD5WQTgLxF#(0T+OvZ6;j1l;Iy%M4acgt
+z`(AnzOt~KqLa!5mWrLO_O6hPAaACS`KkjF)E7Uj^)^>1b7{poM3x#o`9|s;6l^fo@
+zfNv%|68gu%jZZ{*eY!2VZ=rR<v{e#%8iZY5$5!|vkp__^kVi~Z+~QDN_mT4Ct#dp{
+zvU3C8A9-2e`d;Rp>kRO+%pI(`JQ(ogT$K1hm>#KD2lx21Sc_IpX=RJ)Y=N1o#Vlt0
+zw^`m_kT<kC+YZ}*Qp*zF*<HPfSV_1rc#sWw+)*)m`Xioh;tJgYEt@L`^v`m3h`(+4
+zzS&awk1)bt0s(Im|0<D_Gja-?D0dV7JCFO%Lr7`i2HUR}PEAHyjMt!VnZ+qBfG>_p
+za`L<+M~B9d$Vy8u-t-zNP7@)nWzem~UKHTgEZ4<Z4MXB<u6t+bg~f<GF5ZH@s83G6
+z6NI7b&iVZ^ElJMvDhRzhH9$<b-mFU952w%;3}-3C9IXc|`5SZeidNAprHWB0SIkPK
+zV)-ZiQ!>4t^-mzZO8%?<3;v5pFT;P$f7yQpTv;ZXiI_bt%qv?TBCogByk8^TEgQc=
+zV{fh5GB*5Shd|;TIcD1{HsD}oiU%vBHM{L~Znu*-u+QvVKew~fni)!%u+Ln*v%0qO
+zM$2BgWUpU-^YmHJ^O9Zwy|%G!pMm<k-5sWQ&C%?Qk5;y?+TO4iAweWg*-4DK7f#P!
+z0O+v?1@_pu^Qnup3Atp4Cuw@tE>@ZdSYT!6x=qPLo<P`<!fes=_Aa0&C3nx;Vbbeo
+z>AQA6?gl)FJAqA56SWEM-m#;=i|wR4v9ix}lDOON4Y}72gJL6(0Be5x&GSN!k~F{_
+zv@f`$-N|$G_yjKX@$ZQcIDP%iqksQ>qrLV1V*sJ@7*M6i02Y>X!==|1X-=Ud%4rq=
+z{C1HE!!#hK)NOa%+mP`Hy-3EijCf)7+5@-8li?th7$MBbJ_4bo8Slt~hDGT|u}NWx
+z_p|h$V2+>?5UIFoUIEoI0HDtvlBP7r8(BG5_DXwZt^rCVJW7o*r?CnPUwcj&TUj-?
+z@-je{Y-?FP*K$2C0cthK3y`fjdGUL4BU{3#0l!S&cu3IPd`ffdDb4aznr9@0mp1_!
+zKgEvm_!%BT!+o_>p>}rpMN*^op%CGu*=?cWgaH`;2Y_40`Eghmh#+C+Jrc{bVyWFm
+z02GfAr-~$MC|Ot&^%xK=%zor|yJR!vM!Z7PUnfHMBuu(r8C8;_$SUp}-bxe^6$;_P
+zq+q2@b)uyZ6m!C;RV`pv`bztkyXWr^_bw4xVCV#7@Nn9WV{~@$h6`MRn#5*_Y*aO<
+z+^05(RWq2uYHE!&)h3<`tf4g+&`xWzCOgjdm!|MDD<l$kpPZl$<kO;_#PRBu#{s`t
+zz;AV^DVhEV^^qw>Iid6EDPxq93?*fc?V+q6D)-sjM>_qxx^0D@!6d4sAzsJVA@KJ>
+zgf*DHFy&Xtq^Lu}kot5E(rM4)`5yQD7!})1cRh~Q<Y@XP##6dxU0Y_$D5Co(XIuW^
+zSwbD{%Gv{F^yIAU$|k2#R98S3`n6Bt^jUkp>fXB5A=sGymcdZHm8pCdM<?qoD(x7_
+zg{q4lXN;sdpiYL3OW=@v;0$n-gzPybH;5jpW27~@qB2HJa0W(IISP8Hex{BqW2E&#
+z8Q@^Sx(eRRtFW$tt4yrr9E{eb&X`|eya1h**D+%eTs2<+*T~JhmM`WFU;C^62fEgp
+zuisYr7qY^YeB%Lp*{iSPn#W7oLcVmLWs5{#P{z%yaj=v({qnO4Ryvj+`%3Am+e)@D
+zX+G!X%2`-P&YM}bDw~ehjZ#AJ3j=-*=O`*@mf8}Cp9(~R%wq(Z)VTEE>#gb-p}5Ds
+zQgWOi`g`_J{gZkJJ|LXP8m*y*rWOFht^v)HZWeiW9|3MwU+0%Gjz&)NhIfl-lYwSk
+zq(JQ?(cn@B1KIYxr0k!Xh18_;S-lu09WP8TftgO|E&Xfdi@*H&&U;UJPAMckr*M&;
+z8{>)Bg}-z0{uxa8Z;2eG{O1tw;$OP6jP||ABuX6q0g>xOJ|uF3h(xkq61PF*S41dJ
+z_(wztTtuzSy%+#Py;X`5HAL$l2C*o~U<aS{TFV7!eL|CVKpe9hcv(vIb;^w#gTR$4
+zu6#n?m$2wmi^^UI#%R|?qv05%QSsbIlZSFWHIjl!GiCLjawDfcTSX3hM;wU~1xqS)
+zdI+O1EsjkdAl;~J7|Hqc4G?OsEwtFnn#E3NHAu@q4brNb%IMGd#wsrZK+%fpuY7B&
+z`;G5kJ-XdBTA0@3ZxT6A<N}emh)_$+-v+@wNx-LOLRLL4IVyYwC-GnEWD%ead9Ht!
+z<v@<k`e%7}{1UCL7X9-U@dlT7^cu~ly-H*&#(zWO6;1_%|Afd{5K(qrKk1-#_DDq)
+zh2JDX-8Ek!B7;v7S$^bEu3~_4FMScjRCH!m)KYP5Q`-2Cb*gD{vTQv=y?l3wZxr<M
+zoJxr>vU~V0>T$rO!YL~_fhYHA%$yb@PEDIQHWgR9!&o-R_=K~Lc<#W;SxE7LLZ8m`
+zu{BzgEr3&{k1w~4485Jo4xp&-va}l;^5a5Qap~sVPG<=x%!|c0$R#R<Dcws=UB<^5
+O$}EcPGRo`m#{U4Cp6NRP
+
+diff --git a/models/__pycache__/sardensenet_v1.cpython-310.pyc b/models/__pycache__/sardensenet_v1.cpython-310.pyc
+deleted file mode 100644
+index ffe763d7404b16e0a38ad0ea1a62750bcc7138ef..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 4149
+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
+
+diff --git a/models/cpin_blocks.py b/models/cpin_blocks.py
+index db6bf790056d8bd3edb4d8c4e82683df7b0b5e4d..d15e703d8a3a331f36548403755303daf5f42876 100644
+--- a/models/cpin_blocks.py
++++ b/models/cpin_blocks.py
+@@ -1,110 +1,142 @@
+ 
+ # models/cpin_blocks.py
+ from __future__ import annotations
+ from typing import Tuple, List, Dict
+ 
+ import torch
+ import torch.nn as nn
+ import torch.nn.functional as F
+ 
+ 
+-def _resize_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+-    """Resize x spatially to ref using safe ops (avgpool for down, bilinear for up)."""
++def _max_pool_to(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
++    """Downsample x to ref size using max pooling where possible."""
+     H, W = ref.shape[-2:]
+     h, w = x.shape[-2:]
+     if h == H and w == W:
+         return x
+-    # downsample: use adaptive avgpool to avoid aliasing
+-    if h > H or w > W:
+-        return F.adaptive_avg_pool2d(x, output_size=(H, W))
+-    # upsample
+-    return F.interpolate(x, size=(H, W), mode="bilinear", align_corners=False)
++    if h < H or w < W:
++        return F.interpolate(x, size=(H, W), mode="bilinear", align_corners=False)
++    scale_h = max(1, h // H)
++    scale_w = max(1, w // W)
++    if h % H == 0 and w % W == 0 and scale_h == scale_w:
++        return F.max_pool2d(x, kernel_size=scale_h, stride=scale_h)
++    return F.adaptive_max_pool2d(x, output_size=(H, W))
++
++
++def _ensure_size(x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
++    if x.shape[-2:] == ref.shape[-2:]:
++        return x
++    return F.interpolate(x, size=ref.shape[-2:], mode="bilinear", align_corners=False)
+ 
+ 
+ class Conv1x1BNReLU(nn.Module):
+     def __init__(self, in_ch: int, out_ch: int):
+         super().__init__()
+         self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False)
+         self.bn = nn.BatchNorm2d(out_ch)
+         self.relu = nn.ReLU(inplace=True)
+ 
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
+         return self.relu(self.bn(self.conv(x)))
+ 
+ 
+ class IMDFF(nn.Module):
+     """
+     Improved Multiscale Deep Feature Fusion (IMDFF) per CPINet:
+       Eq(1): F'_DB3 = F_DB3 + f1x1(Concat[DS/US of DB1,DB2,DB4,DB5] to DB3 size)
+       Eq(2): FMS = f1x1(Concat[MaxPool2(F'_DB3), F'_DB4])  (DB34 fusion)
+     We implement fused maps for DB3/DB4/DB5 plus FMS.
+     """
+-    def __init__(self, chs: Dict[str, int], fuse_ch: int = 128):
++    def __init__(self, chs: Dict[str, int], fuse_ch: int = 128, use_fms: bool = True, use_db5_fusion: bool = True):
+         super().__init__()
+         self.chs = chs
++        self.use_fms = use_fms
++        self.use_db5_fusion = use_db5_fusion
+         # DB3 fusion: concat of 4 resized feature maps -> fuse_ch -> residual add to DB3
+         in3 = chs["db1"] + chs["db2"] + chs["db4"] + chs["db5"]
+         self.fuse3 = Conv1x1BNReLU(in3, fuse_ch)
+         self.proj3 = nn.Conv2d(fuse_ch, chs["db3"], kernel_size=1, bias=False)
+ 
+         # DB4 fusion
+         in4 = chs["db1"] + chs["db2"] + chs["db3"] + chs["db5"]
+         self.fuse4 = Conv1x1BNReLU(in4, fuse_ch)
+         self.proj4 = nn.Conv2d(fuse_ch, chs["db4"], kernel_size=1, bias=False)
+ 
+         # DB5 fusion (for MO-SE / DB5 self-aggregation)
+         in5 = chs["db1"] + chs["db2"] + chs["db3"] + chs["db4"]
+         self.fuse5 = Conv1x1BNReLU(in5, fuse_ch)
+         self.proj5 = nn.Conv2d(fuse_ch, chs["db5"], kernel_size=1, bias=False)
+ 
+         # Eq(2): FMS from DB3' (maxpool2) + DB4'
+         self.fms_fuse = Conv1x1BNReLU(chs["db3"] + chs["db4"], fuse_ch)
+         self.fms_proj = nn.Conv2d(fuse_ch, fuse_ch, kernel_size=1, bias=False)
+ 
++        self.up_db4_to_db3 = nn.ConvTranspose2d(chs["db4"], chs["db4"], kernel_size=2, stride=2, bias=False)
++        self.up_db5_to_db3 = nn.ConvTranspose2d(chs["db5"], chs["db5"], kernel_size=4, stride=4, bias=False)
++        self.up_db5_to_db4 = nn.ConvTranspose2d(chs["db5"], chs["db5"], kernel_size=2, stride=2, bias=False)
++
+     def forward(self, feats: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+         db1, db2, db3, db4, db5 = feats["db1"], feats["db2"], feats["db3"], feats["db4"], feats["db5"]
+ 
+         # DB3'
+-        cat3 = torch.cat([_resize_to(db1, db3), _resize_to(db2, db3), _resize_to(db4, db3), _resize_to(db5, db3)], dim=1)
++        db1_ds = _max_pool_to(db1, db3)
++        db2_ds = _max_pool_to(db2, db3)
++        db4_us = _ensure_size(self.up_db4_to_db3(db4), db3)
++        db5_us = _ensure_size(self.up_db5_to_db3(db5), db3)
++        cat3 = torch.cat([db1_ds, db2_ds, db4_us, db5_us], dim=1)
+         r3 = self.proj3(self.fuse3(cat3))
+         db3p = db3 + r3
+ 
+         # DB4'
+-        cat4 = torch.cat([_resize_to(db1, db4), _resize_to(db2, db4), _resize_to(db3, db4), _resize_to(db5, db4)], dim=1)
++        db1_ds = _max_pool_to(db1, db4)
++        db2_ds = _max_pool_to(db2, db4)
++        db3_ds = _max_pool_to(db3, db4)
++        db5_us = _ensure_size(self.up_db5_to_db4(db5), db4)
++        cat4 = torch.cat([db1_ds, db2_ds, db3_ds, db5_us], dim=1)
+         r4 = self.proj4(self.fuse4(cat4))
+         db4p = db4 + r4
+ 
+         # DB5'
+-        cat5 = torch.cat([_resize_to(db1, db5), _resize_to(db2, db5), _resize_to(db3, db5), _resize_to(db4, db5)], dim=1)
+-        r5 = self.proj5(self.fuse5(cat5))
+-        db5p = db5 + r5
++        if self.use_db5_fusion:
++            db1_ds = _max_pool_to(db1, db5)
++            db2_ds = _max_pool_to(db2, db5)
++            db3_ds = _max_pool_to(db3, db5)
++            db4_ds = _max_pool_to(db4, db5)
++            cat5 = torch.cat([db1_ds, db2_ds, db3_ds, db4_ds], dim=1)
++            r5 = self.proj5(self.fuse5(cat5))
++            db5p = db5 + r5
++        else:
++            db5p = db5
+ 
+         # FMS: maxpool2(DB3') -> concat with DB4' -> f1x1
+-        db3p_ds = F.max_pool2d(db3p, kernel_size=2, stride=2)
+-        db3p_ds = _resize_to(db3p_ds, db4p)  # robust if odd sizes
+-        fms = self.fms_proj(self.fms_fuse(torch.cat([db3p_ds, db4p], dim=1)))
++        if self.use_fms:
++            db3p_ds = F.max_pool2d(db3p, kernel_size=2, stride=2)
++            db3p_ds = _ensure_size(db3p_ds, db4p)  # robust if odd sizes
++            fms = self.fms_proj(self.fms_fuse(torch.cat([db3p_ds, db4p], dim=1)))
++        else:
++            fms = db4p
+ 
+         return {"db3p": db3p, "db4p": db4p, "db5p": db5p, "fms": fms}
+ 
+ 
+ class GroupBilinearPooling(nn.Module):
+     """
+     GBP per MS-GBCNN / CPINet MO-SE squeeze (Eq.5 in MS-GBCNN paper):
+       Split channels into G groups of d=C/G, compute bilinear pooling for each pair i<=j,
+       vectorize and concatenate -> z_gbp.
+     """
+     def __init__(self, groups: int = 3, eps: float = 1e-6):
+         super().__init__()
+         self.groups = groups
+         self.eps = eps
+ 
+     def forward(self, x1: torch.Tensor, x2: torch.Tensor | None = None) -> torch.Tensor:
+         if x2 is None:
+             x2 = x1
+         B, C, H, W = x1.shape
+         G = self.groups
+         assert C % G == 0, f"channels({C}) must be divisible by groups({G})"
+         d = C // G
+         N = H * W
+ 
+         a = x1.view(B, G, d, N)
+@@ -201,25 +233,67 @@ class MOSE(nn.Module):
+         x = torch.sigmoid(x)
+         return x
+ 
+     def forward(self, f_vh: torch.Tensor, f_vv: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+         # squeeze VH
+         gap_vh = torch.mean(f_vh, dim=(2, 3))                 # (B,C)
+         gbp_vh = self.gbp(f_vh)                               # (B,gbp_dim) already normalized
+         s_gap_vh = self._excite(gap_vh, self.gap_fc1, self.gap_bn1, self.gap_fc2, self.gap_bn2)
+         s_gbp_vh = self._excite(gbp_vh, self.gbp_fc1, self.gbp_bn1, self.gbp_fc2, self.gbp_bn2)
+ 
+         # squeeze VV
+         gap_vv = torch.mean(f_vv, dim=(2, 3))
+         gbp_vv = self.gbp(f_vv)
+         s_gap_vv = self._excite(gap_vv, self.gap_fc1, self.gap_bn1, self.gap_fc2, self.gap_bn2)
+         s_gbp_vv = self._excite(gbp_vv, self.gbp_fc1, self.gbp_bn1, self.gbp_fc2, self.gbp_bn2)
+ 
+         # cross-pol augmentation: (F + s_gap) * s_gbp
+         s_gap_vh4 = s_gap_vh[:, :, None, None]
+         s_gbp_vh4 = s_gbp_vh[:, :, None, None]
+         s_gap_vv4 = s_gap_vv[:, :, None, None]
+         s_gbp_vv4 = s_gbp_vv[:, :, None, None]
+ 
+         f_vh_aug = (f_vh + s_gap_vv4) * s_gbp_vv4
+         f_vv_aug = (f_vv + s_gap_vh4) * s_gbp_vh4
+         return f_vh_aug, f_vv_aug
++
++
++class SEBlock(nn.Module):
++    def __init__(self, ch: int, reduction: int = 16):
++        super().__init__()
++        hid = max(8, ch // reduction)
++        self.fc1 = nn.Linear(ch, hid, bias=False)
++        self.bn1 = nn.BatchNorm1d(hid)
++        self.fc2 = nn.Linear(hid, ch, bias=False)
++        self.bn2 = nn.BatchNorm1d(ch)
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        s = torch.mean(x, dim=(2, 3))
++        s = self.fc1(s)
++        s = self.bn1(s)
++        s = F.relu(s, inplace=True)
++        s = self.fc2(s)
++        s = self.bn2(s)
++        s = torch.sigmoid(s)
++        return x * s[:, :, None, None]
++
++
++class CBAM(nn.Module):
++    def __init__(self, ch: int, reduction: int = 16, spatial_kernel: int = 7):
++        super().__init__()
++        hid = max(8, ch // reduction)
++        self.mlp = nn.Sequential(
++            nn.Linear(ch, hid, bias=False),
++            nn.ReLU(inplace=True),
++            nn.Linear(hid, ch, bias=False),
++        )
++        self.spatial = nn.Conv2d(2, 1, kernel_size=spatial_kernel, padding=spatial_kernel // 2, bias=False)
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        gap = torch.mean(x, dim=(2, 3))
++        gmp = torch.amax(x, dim=(2, 3))
++        ch_att = torch.sigmoid(self.mlp(gap) + self.mlp(gmp))
++        x = x * ch_att[:, :, None, None]
++        avg = torch.mean(x, dim=1, keepdim=True)
++        mx = torch.amax(x, dim=1, keepdim=True)
++        sp_att = torch.sigmoid(self.spatial(torch.cat([avg, mx], dim=1)))
++        return x * sp_att
+diff --git a/models/cpinet_baselines.py b/models/cpinet_baselines.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f4f71fc742504b15c02367c2aa6fa32977768d1
+--- /dev/null
++++ b/models/cpinet_baselines.py
+@@ -0,0 +1,76 @@
++# models/cpinet_baselines.py
++from __future__ import annotations
++from typing import Dict, Tuple, List
++
++import torch
++import torch.nn as nn
++
++from .sardensenet_v1 import SARDenseNetV1
++from .cpin_blocks import GroupBilinearPooling
++
++
++class _Head(nn.Module):
++    def __init__(self, in_dim: int, embed_dim: int, num_classes: int, dropout: float = 0.0):
++        super().__init__()
++        self.embed = nn.Sequential(
++            nn.Linear(in_dim, embed_dim, bias=False),
++            nn.BatchNorm1d(embed_dim),
++            nn.ReLU(inplace=True),
++            nn.Dropout(p=dropout),
++        )
++        self.cls = nn.Linear(embed_dim, num_classes)
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        return self.cls(self.embed(x))
++
++
++class BackboneNet(nn.Module):
++    """
++    Single-pol backbone baseline used for Table 7.
++    """
++    branch_names = ["main"]
++
++    def __init__(self, num_classes: int, stem_ch: int = 24, embed_dim: int = 1024, dropout: float = 0.2):
++        super().__init__()
++        self.backbone = SARDenseNetV1(stem_ch=stem_ch)
++        ch_db5 = self.backbone.out_channels["db5"]
++        self.head = _Head(in_dim=ch_db5, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
++
++    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
++        feats = self.backbone(x)
++        db5 = feats["db5"]
++        pooled = torch.mean(db5, dim=(2, 3))
++        logits = self.head(pooled)
++        return logits, {"main": logits}
++
++
++class GBCNN(nn.Module):
++    """
++    Dual-pol GBCNN-style baseline using group bilinear pooling on DB5 features.
++    """
++    branch_names = ["main"]
++
++    def __init__(
++        self,
++        num_classes: int,
++        stem_ch: int = 24,
++        gbp_groups: int = 3,
++        embed_dim: int = 1024,
++        dropout: float = 0.2,
++    ):
++        super().__init__()
++        self.bb_vh = SARDenseNetV1(stem_ch=stem_ch)
++        self.bb_vv = SARDenseNetV1(stem_ch=stem_ch)
++        ch_db5 = self.bb_vh.out_channels["db5"]
++        assert ch_db5 % gbp_groups == 0, "db5 channels must be divisible by gbp_groups"
++        d = ch_db5 // gbp_groups
++        gbp_dim = (gbp_groups * (gbp_groups + 1) // 2) * d * d
++        self.gbp = GroupBilinearPooling(groups=gbp_groups)
++        self.head = _Head(in_dim=gbp_dim, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
++
++    def forward(self, vh: torch.Tensor, vv: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
++        f_vh = self.bb_vh(vh)["db5"]
++        f_vv = self.bb_vv(vv)["db5"]
++        pooled = self.gbp(f_vh, f_vv)
++        logits = self.head(pooled)
++        return logits, {"main": logits}
+diff --git a/models/cpinet_p1.py b/models/cpinet_p1.py
+index a66f654659792735cf61aeed96d67b739364feac..f0c085296ef3a36b31c0fe31397e8fc2fb39be92 100644
+--- a/models/cpinet_p1.py
++++ b/models/cpinet_p1.py
+@@ -1,122 +1,168 @@
+ 
+ # models/cpinet_p1.py
+ from __future__ import annotations
+ from typing import Dict, Tuple, List
+ 
+ import torch
+ import torch.nn as nn
+ import torch.nn.functional as F
+ 
+ from .sardensenet_v1 import SARDenseNetV1
+-from .cpin_blocks import IMDFF, MOSE, FBCPooling
++from .cpin_blocks import IMDFF, MOSE, FBCPooling, GroupBilinearPooling, SEBlock, CBAM
+ 
+ 
+ class _Head(nn.Module):
+     def __init__(self, in_dim: int, embed_dim: int, num_classes: int, dropout: float = 0.0):
+         super().__init__()
+         self.embed = nn.Sequential(
+             nn.Linear(in_dim, embed_dim, bias=False),
+-            # nn.BatchNorm1d(embed_dim),  <-- Removed to support batch size 1 training
+-            nn.LayerNorm(embed_dim),     # <-- Replaced with LayerNorm
++            nn.BatchNorm1d(embed_dim),
+             nn.ReLU(inplace=True),
+             nn.Dropout(p=dropout),
+         )
+         self.cls = nn.Linear(embed_dim, num_classes)
+ 
+     def forward(self, z: torch.Tensor) -> torch.Tensor:
+         return self.cls(self.embed(z))
+ 
+ 
+ class CPINetP1(nn.Module):
+     """
+     CPINet P1 reproduction:
+       - SAR-DenseNet-v1 backbone (VH/VV)
+       - IMDFF (Eq.1-2) -> DB3', DB4', DB5', FMS (DB34 fusion)
+       - MO-SE augmentation on DB5'
+       - FBC pooling for:
+           DB34 cross, MO-SE cross, DB5-VH self, DB5-VV self
+       - 4 heads -> 4 logits; inference assembling: mean of logits (configurable)
+     """
+     branch_names = ["db34", "mose", "db5_vh", "db5_vv"]
+ 
+     def __init__(
+         self,
+         num_classes: int,
+         stem_ch: int = 24,
+         fuse_ch: int = 128,
+         fbc_k: int = 2048,
+         fbc_lam: float = 1e-3,
+         embed_dim: int = 1024,
+         gbp_groups: int = 3,
+         dropout: float = 0.0,
+         assemble: str = "logit_mean",   # logit_mean | prob_mean
++        fusion: str = "imdff",          # imdff | msdff
++        attention: str = "mose",        # mose | se | cbam | none
++        pooling: str = "fbc",           # fbc | gbp
++        share_head: bool = True,
++        db34_source: str = "fms",       # fms | db4p
+     ):
+         super().__init__()
+         self.num_classes = num_classes
+         self.assemble = assemble
++        self.fusion = fusion
++        self.attention = attention
++        self.pooling = pooling
++        self.share_head = share_head
++        self.db34_source = db34_source
+ 
+         self.bb_vh = SARDenseNetV1(stem_ch=stem_ch)
+         self.bb_vv = SARDenseNetV1(stem_ch=stem_ch)
+ 
+-        self.imdff_vh = IMDFF(self.bb_vh.out_channels, fuse_ch=fuse_ch)
+-        self.imdff_vv = IMDFF(self.bb_vv.out_channels, fuse_ch=fuse_ch)
++        use_fms = fusion == "imdff"
++        use_db5_fusion = fusion == "imdff"
++        self.imdff_vh = IMDFF(self.bb_vh.out_channels, fuse_ch=fuse_ch, use_fms=use_fms, use_db5_fusion=use_db5_fusion)
++        self.imdff_vv = IMDFF(self.bb_vv.out_channels, fuse_ch=fuse_ch, use_fms=use_fms, use_db5_fusion=use_db5_fusion)
+ 
+         ch_db5 = self.bb_vh.out_channels["db5"]
+-        self.mose = MOSE(ch=ch_db5, gbp_groups=gbp_groups)
+-
+-        # FBC pools: DB34 uses fuse_ch channels, MO-SE uses db5 channels, DB5 self uses db5 channels
+-        self.fbc_db34 = FBCPooling(in_ch=fuse_ch, k=fbc_k, lam=fbc_lam)
+-        self.fbc_mose = FBCPooling(in_ch=ch_db5, k=fbc_k, lam=fbc_lam)
+-        self.fbc_db5  = FBCPooling(in_ch=ch_db5, k=fbc_k, lam=fbc_lam)
++        if attention == "mose":
++            self.att_block = MOSE(ch=ch_db5, gbp_groups=gbp_groups)
++        elif attention == "se":
++            self.att_block = SEBlock(ch=ch_db5)
++        elif attention == "cbam":
++            self.att_block = CBAM(ch=ch_db5)
++        else:
++            self.att_block = None
++
++        self.pool_db34, dim_db34 = self._build_pool(in_ch=fuse_ch, k=fbc_k, lam=fbc_lam, groups=gbp_groups)
++        self.pool_mose, dim_mose = self._build_pool(in_ch=ch_db5, k=fbc_k, lam=fbc_lam, groups=gbp_groups)
++        self.pool_db5, dim_db5 = self._build_pool(in_ch=ch_db5, k=fbc_k, lam=fbc_lam, groups=gbp_groups)
+ 
+         # Heads
+-        self.head_db34 = _Head(in_dim=fbc_k, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
+-        self.head_mose = _Head(in_dim=fbc_k, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
+-        self.head_db5_vh = _Head(in_dim=fbc_k, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
+-        self.head_db5_vv = _Head(in_dim=fbc_k, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
++        if share_head:
++            if not (dim_db34 == dim_mose == dim_db5):
++                raise ValueError("share_head=True requires identical pooled dimensions across branches.")
++            self.shared_head = _Head(in_dim=dim_db5, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
++            self.head_db34 = self.shared_head
++            self.head_mose = self.shared_head
++            self.head_db5_vh = self.shared_head
++            self.head_db5_vv = self.shared_head
++        else:
++            self.head_db34 = _Head(in_dim=dim_db34, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
++            self.head_mose = _Head(in_dim=dim_mose, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
++            self.head_db5_vh = _Head(in_dim=dim_db5, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
++            self.head_db5_vv = _Head(in_dim=dim_db5, embed_dim=embed_dim, num_classes=num_classes, dropout=dropout)
++
++    def _build_pool(self, in_ch: int, k: int, lam: float, groups: int) -> Tuple[nn.Module, int]:
++        if self.pooling == "gbp":
++            assert in_ch % groups == 0, f"in_ch({in_ch}) must be divisible by groups({groups})"
++            d = in_ch // groups
++            dim = (groups * (groups + 1) // 2) * d * d
++            return GroupBilinearPooling(groups=groups), dim
++        return FBCPooling(in_ch=in_ch, k=k, lam=lam), k
+ 
+     def gradnorm_shared_parameters(self) -> List[torch.nn.Parameter]:
+         # Use the last DenseBlock parameters as shared reference (both pols are shared topology but not weights).
+         # GradNorm needs any shared trunk parameter set; choose DB5 of both towers.
+         params = []
+         params += list(self.bb_vh.db5.parameters())
+         params += list(self.bb_vv.db5.parameters())
+         return params
+ 
+     def forward(self, vh: torch.Tensor, vv: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+         feats_vh = self.bb_vh(vh)
+         feats_vv = self.bb_vv(vv)
+ 
+         out_vh = self.imdff_vh(feats_vh)
+         out_vv = self.imdff_vv(feats_vv)
+ 
+-        # DB34 (FMS cross)
+-        z_db34 = self.fbc_db34(out_vh["fms"], out_vv["fms"])
++        # DB34 (FMS cross or DB4' if MSDFF ablation)
++        if self.db34_source == "db4p":
++            db34_vh = out_vh["db4p"]
++            db34_vv = out_vv["db4p"]
++        else:
++            db34_vh = out_vh["fms"]
++            db34_vv = out_vv["fms"]
++        z_db34 = self.pool_db34(db34_vh, db34_vv)
+         logits_db34 = self.head_db34(z_db34)
+ 
+-        # MO-SE augmented DB5' -> cross FBC
+-        vh_aug, vv_aug = self.mose(out_vh["db5p"], out_vv["db5p"])
+-        z_mose = self.fbc_mose(vh_aug, vv_aug)
++        # MO-SE/SE/CBAM augmented DB5' -> cross pooling
++        if self.attention == "mose":
++            vh_aug, vv_aug = self.att_block(out_vh["db5p"], out_vv["db5p"])
++        elif self.att_block is None:
++            vh_aug, vv_aug = out_vh["db5p"], out_vv["db5p"]
++        else:
++            vh_aug = self.att_block(out_vh["db5p"])
++            vv_aug = self.att_block(out_vv["db5p"])
++        z_mose = self.pool_mose(vh_aug, vv_aug)
+         logits_mose = self.head_mose(z_mose)
+ 
+         # DB5 self
+-        z_db5_vh = self.fbc_db5(out_vh["db5p"], out_vh["db5p"])
+-        z_db5_vv = self.fbc_db5(out_vv["db5p"], out_vv["db5p"])
++        z_db5_vh = self.pool_db5(out_vh["db5p"], out_vh["db5p"])
++        z_db5_vv = self.pool_db5(out_vv["db5p"], out_vv["db5p"])
+         logits_db5_vh = self.head_db5_vh(z_db5_vh)
+         logits_db5_vv = self.head_db5_vv(z_db5_vv)
+ 
+         aux = {
+             "db34": logits_db34,
+             "mose": logits_mose,
+             "db5_vh": logits_db5_vh,
+             "db5_vv": logits_db5_vv,
+         }
+ 
+         if self.assemble == "prob_mean":
+             probs = [F.softmax(aux[k], dim=1) for k in self.branch_names]
+             prob = sum(probs) / len(probs)
+             logits = torch.log(prob + 1e-12)
+         else:  # logit_mean
+             logits = sum([aux[k] for k in self.branch_names]) / len(self.branch_names)
+ 
+         return logits, aux
+diff --git a/plot_paper_figures.py b/plot_paper_figures.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..044837701c3605ca28cdc6847812731366df4f5e
+--- /dev/null
++++ b/plot_paper_figures.py
+@@ -0,0 +1,93 @@
++# plot_paper_figures.py
++import argparse
++from pathlib import Path
++from typing import List, Tuple
++
++import matplotlib.pyplot as plt
++import csv
++
++
++def read_history(path: Path) -> dict:
++    with open(path, "r", encoding="utf-8") as f:
++        reader = csv.DictReader(f)
++        rows = list(reader)
++    cols = {k: [] for k in reader.fieldnames or []}
++    for row in rows:
++        for k in cols:
++            cols[k].append(float(row[k]))
++    return cols
++
++
++def plot_sensitivity(run_dirs: List[str], labels: List[str], metric: str, out_path: Path, title: str) -> None:
++    fig, ax = plt.subplots(figsize=(6, 4))
++    for run_dir, label in zip(run_dirs, labels):
++        df = read_history(Path(run_dir) / "history.csv")
++        ax.plot(df["epoch"], df[metric], label=label)
++    ax.set_xlabel("Epoch")
++    ax.set_ylabel(metric.replace("_", " ").title())
++    ax.set_title(title)
++    ax.legend()
++    fig.tight_layout()
++    fig.savefig(out_path, dpi=200)
++    plt.close(fig)
++
++
++def plot_gradnorm(run_dir: str, out_path: Path) -> None:
++    df = read_history(Path(run_dir) / "history.csv")
++    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
++
++    weight_cols = [c for c in df.keys() if c.startswith("w_")]
++    for c in weight_cols:
++        axes[0].plot(df["epoch"], df[c], label=c.replace("w_", "w_"))
++    axes[0].set_title("Weight Magnitude")
++    axes[0].set_xlabel("Epoch")
++    axes[0].set_ylabel("Weight")
++    axes[0].legend()
++
++    loss_cols = [c for c in df.keys() if c.startswith("loss_") and c != "loss_total"]
++    for c in loss_cols:
++        axes[1].plot(df["epoch"], df[c], label=c.replace("loss_", "L_"))
++    axes[1].set_title("Loss Value")
++    axes[1].set_xlabel("Epoch")
++    axes[1].set_ylabel("Loss")
++    axes[1].legend()
++
++    ratio_cols = [c for c in df.keys() if c.startswith("ratio_")]
++    for c in ratio_cols:
++        axes[2].plot(df["epoch"], df[c], label=c.replace("ratio_", "r_"))
++    axes[2].set_title("Loss Ratio")
++    axes[2].set_xlabel("Epoch")
++    axes[2].set_ylabel("Ratio")
++    axes[2].legend()
++
++    fig.tight_layout()
++    fig.savefig(out_path, dpi=200)
++    plt.close(fig)
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--k_runs", nargs="*", default=[], help="Run dirs for different k values.")
++    ap.add_argument("--k_labels", nargs="*", default=[], help="Labels for k runs.")
++    ap.add_argument("--lam_runs", nargs="*", default=[], help="Run dirs for different lambda values.")
++    ap.add_argument("--lam_labels", nargs="*", default=[], help="Labels for lambda runs.")
++    ap.add_argument("--metric", type=str, default="val_acc")
++    ap.add_argument("--gradnorm_run", type=str, default=None)
++    ap.add_argument("--out_dir", type=str, default="runs/plots")
++    args = ap.parse_args()
++
++    out_dir = Path(args.out_dir)
++    out_dir.mkdir(parents=True, exist_ok=True)
++
++    if args.k_runs:
++        labels = args.k_labels or [Path(r).name for r in args.k_runs]
++        plot_sensitivity(args.k_runs, labels, args.metric, out_dir / "fig6_k.png", "Sensitivity: k")
++    if args.lam_runs:
++        labels = args.lam_labels or [Path(r).name for r in args.lam_runs]
++        plot_sensitivity(args.lam_runs, labels, args.metric, out_dir / "fig6_lambda.png", "Sensitivity: lambda")
++    if args.gradnorm_run:
++        plot_gradnorm(args.gradnorm_run, out_dir / "fig7_gradnorm.png")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/train_cpinet.py b/train_cpinet.py
+index 6c813fb9fb005c7c91dd20c7b1a4f43be5e1ec79..6e9b8515f19977c88e32cadcf2b3ca19bdec3766 100644
+--- a/train_cpinet.py
++++ b/train_cpinet.py
+@@ -1,120 +1,129 @@
+ 
+ # train_cpinet.py (P1: CPINet reproduction)
+ import argparse
+ from pathlib import Path
+ from typing import Dict, List, Tuple, Optional
+ 
+ import numpy as np
+ import torch
+ import torch.nn.functional as F
+ from torch.utils.data import DataLoader
+ 
+ from dualpol_dataset import DualPolCSVDataset, AugCfg
+ from models.cpinet_p1 import CPINetP1
++from models.cpinet_baselines import BackboneNet, GBCNN
+ from utils_metrics import top1_accuracy, confusion_matrix, per_class_prf
+ 
+ 
+ def build_label2id(csv_paths):
+     """Build label2id from one or more CSVs. CSV must contain 'label_name' column."""
+     import csv
+     labels = []
+     for p in csv_paths:
+         if p is None:
+             continue
+         with open(p, "r", encoding="utf-8") as f:
+             r = csv.DictReader(f)
+             for row in r:
+                 labels.append(row["label_name"])
+     uniq = sorted(set(labels))
+     return {name: i for i, name in enumerate(uniq)}
+ 
+ 
+ 
+ 
+ def ce_loss(logits: torch.Tensor, y: torch.Tensor, label_smoothing: float = 0.0) -> torch.Tensor:
+     return F.cross_entropy(logits, y, label_smoothing=label_smoothing)
+ 
+ 
++def _run_model(model: torch.nn.Module, x_vh: torch.Tensor, x_vv: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
++    if getattr(model, "input_mode", "dual") == "vh":
++        return model(x_vh)
++    if getattr(model, "input_mode", "dual") == "vv":
++        return model(x_vv)
++    return model(x_vh, x_vv)
++
++
+ @torch.no_grad()
+ def evaluate(model: torch.nn.Module, loader: DataLoader, device: str, num_classes: int) -> Dict[str, float]:
+     model.eval()
+     ys, ps = [], []
+     total_loss = 0.0
+     n = 0
+     for x_vv, x_vh, y in loader:
+         x_vv = x_vv.to(device)
+         x_vh = x_vh.to(device)
+         y = y.to(device)
+-        logits, aux = model(x_vh, x_vv)
++        logits, aux = _run_model(model, x_vh, x_vv)
+         loss = F.cross_entropy(logits, y)
+         total_loss += float(loss.item()) * y.size(0)
+         n += y.size(0)
+ 
+         pred = logits.argmax(dim=1).detach().cpu().numpy()
+         ys.append(y.detach().cpu().numpy())
+         ps.append(pred)
+ 
+     y_true = np.concatenate(ys, axis=0) if ys else np.zeros((0,), dtype=np.int64)
+     y_pred = np.concatenate(ps, axis=0) if ps else np.zeros((0,), dtype=np.int64)
+     cm = confusion_matrix(num_classes, y_true, y_pred)
+     prf = per_class_prf(cm)
+     acc = float((y_true == y_pred).mean()) if len(y_true) else 0.0
+ 
+     return {
+         "loss": total_loss / max(1, n),
+         "acc": acc,
+         "macro_f1": float(np.mean(prf["f1"])) if cm.sum() else 0.0,
+     }
+ 
+ 
+ def train_one_epoch(
+-    model: CPINetP1,
++    model: torch.nn.Module,
+     loader: DataLoader,
+     device: str,
+     opt_model: torch.optim.Optimizer,
+     loss_balance: str,
+     gradnorm_alpha: float,
+     opt_w: Optional[torch.optim.Optimizer],
+     w: Optional[torch.nn.Parameter],
+     init_losses: Optional[torch.Tensor],
+     label_smoothing: float,
+ ) -> Tuple[float, Dict[str, float], Optional[torch.Tensor]]:
+     model.train()
+     total = 0.0
+     n = 0
+     logs_sum: Dict[str, float] = {k: 0.0 for k in ["loss_total"] + [f"loss_{b}" for b in model.branch_names]}
+ 
+     for x_vv, x_vh, y in loader:
+         x_vv = x_vv.to(device)
+         x_vh = x_vh.to(device)
+         y = y.to(device)
+ 
+-        logits, aux = model(x_vh, x_vv)
++        logits, aux = _run_model(model, x_vh, x_vv)
+         losses = torch.stack([ce_loss(aux[b], y, label_smoothing) for b in model.branch_names])  # (4,)
+ 
+-        if loss_balance == "sum":
++        if loss_balance == "sum" or len(model.branch_names) == 1:
+             loss_total = losses.sum()
+             opt_model.zero_grad(set_to_none=True)
+             loss_total.backward()
+             opt_model.step()
+         else:
+             # GradNorm (Adaptive loss balancing) on 4 CE losses
+             assert w is not None and opt_w is not None
+             # init losses on first batch
+             if init_losses is None:
+                 init_losses = losses.detach()
+ 
+             # weighted loss for model update
+             weighted = (w * losses).sum()
+ 
+             # compute gradient norms for each task wrt shared params
+             shared_params = model.gradnorm_shared_parameters()
+             g_list = []
+             for i in range(len(model.branch_names)):
+                 g = torch.autograd.grad(w[i] * losses[i], shared_params, retain_graph=True, create_graph=True)
+                 # global L2 norm across shared params
+                 g_norm = torch.norm(torch.stack([gi.norm(p=2) for gi in g]), p=2)
+                 g_list.append(g_norm)
+             g_list = torch.stack(g_list)  # (4,)
+             g_avg = g_list.mean().detach()
+ 
+@@ -146,153 +155,220 @@ def train_one_epoch(
+                 w.data = w.data * (len(model.branch_names) / w.data.sum())
+ 
+             loss_total = weighted.detach()
+ 
+         bs = y.size(0)
+         total += float(loss_total.item()) * bs
+         n += bs
+ 
+         logs_sum["loss_total"] += float(loss_total.item()) * bs
+         for i, b in enumerate(model.branch_names):
+             logs_sum[f"loss_{b}"] += float(losses[i].item()) * bs
+ 
+     logs = {k: v / max(1, n) for k, v in logs_sum.items()}
+     return total / max(1, n), logs, init_losses
+ 
+ 
+ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--train_csv", type=str, required=True)
+     ap.add_argument("--val_csv", type=str, required=True)
+     ap.add_argument("--test_csv", type=str, required=False, default=None)
+     ap.add_argument("--out_dir", type=str, default="runs/cpinet_p1")
+     ap.add_argument("--run_dir", type=str, default=None, help="Optional explicit run directory (for repeated splits).")
+     ap.add_argument("--save_json", action="store_true", help="Save final metrics to metrics.json in run_dir.")
+     ap.add_argument("--epochs", type=int, default=300)
+-    ap.add_argument("--batch", type=int, default=64)
++    ap.add_argument("--batch", type=int, default=32)
+     ap.add_argument("--workers", type=int, default=4)
+     ap.add_argument("--imgsz", type=int, default=64)
+     ap.add_argument("--num_classes", type=int, default=3)
+ 
+     ap.add_argument("--loss_balance", type=str, default="gradnorm", choices=["sum", "gradnorm"])
+     ap.add_argument("--gradnorm_alpha", type=float, default=1.5)
+     ap.add_argument("--label_smoothing", type=float, default=0.0)
+ 
+     ap.add_argument("--fbc_k", type=int, default=2048)
+     ap.add_argument("--fbc_lam", type=float, default=1e-3)
+     ap.add_argument('--fbc_l1', dest='fbc_lam', type=float, help='Alias of --fbc_lam')
+     
+     ap.add_argument("--fuse_ch", type=int, default=128)
+     ap.add_argument("--embed_dim", type=int, default=1024)
+     ap.add_argument("--gbp_groups", type=int, default=3)
+-    ap.add_argument("--dropout", type=float, default=0.0)
++    ap.add_argument("--dropout", type=float, default=0.2)
+     ap.add_argument("--assemble", type=str, default="logit_mean", choices=["logit_mean", "prob_mean"])
+-
+-    ap.add_argument("--lr", type=float, default=3e-4)
+-    ap.add_argument("--wd", type=float, default=1e-2)
++    ap.add_argument("--fusion", type=str, default="imdff", choices=["imdff", "msdff"])
++    ap.add_argument("--attention", type=str, default="mose", choices=["mose", "se", "cbam", "none"])
++    ap.add_argument("--pooling", type=str, default="fbc", choices=["fbc", "gbp"])
++    ap.add_argument("--no_share_head", action="store_true", help="Disable shared head (default uses shared head).")
++    ap.add_argument("--db34_source", type=str, default="fms", choices=["fms", "db4p"])
++    ap.add_argument("--model", type=str, default="cpinet", choices=["cpinet", "backbone", "gbcnn"])
++    ap.add_argument("--input_mode", type=str, default="dual", choices=["dual", "vh", "vv"])
++
++    ap.add_argument("--optimizer", type=str, default="sgd", choices=["sgd", "adamw"])
++    ap.add_argument("--lr", type=float, default=0.01)
++    ap.add_argument("--wd", type=float, default=5e-4)
++    ap.add_argument("--momentum", type=float, default=0.9)
+     ap.add_argument("--device", type=str, default="cuda:0")
+     ap.add_argument("--seed", type=int, default=42)
+     ap.add_argument("--no_aug", action="store_true")
+ 
+     args = ap.parse_args()
+     torch.manual_seed(args.seed)
+     np.random.seed(args.seed)
+ 
+     device = args.device if torch.cuda.is_available() else "cpu"
+     run_dir = Path(args.run_dir) if args.run_dir else Path(args.out_dir)
+     run_dir.mkdir(parents=True, exist_ok=True)
+ 
+     # Build consistent label map for this run (important for repeated splits)
+     import json
+     csvs = [args.train_csv, args.val_csv]
+     if args.test_csv:
+         csvs.append(args.test_csv)
+     label2id = build_label2id(csvs)
+     (run_dir / "label2id.json").write_text(
+         json.dumps(label2id, ensure_ascii=False, indent=2),
+         encoding="utf-8"
+     )
+     if len(label2id) != args.num_classes:
+         print(f"[Warn] args.num_classes={args.num_classes}, but label2id has {len(label2id)} classes: {list(label2id.keys())}")
+ 
+     aug = AugCfg(enable=not args.no_aug)
+     ds_tr = DualPolCSVDataset(args.train_csv, label2id, img_size=args.imgsz, aug=aug)
+     ds_va = DualPolCSVDataset(args.val_csv,   label2id, img_size=args.imgsz, aug=AugCfg(enable=False))
+     dl_tr = DataLoader(ds_tr, batch_size=args.batch, shuffle=True, num_workers=args.workers, pin_memory=True)
+ 
+     dl_va = DataLoader(ds_va, batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True)
+ 
+-    model = CPINetP1(
+-        num_classes=args.num_classes,
+-        fuse_ch=args.fuse_ch,
+-        fbc_k=args.fbc_k,
+-        fbc_lam=args.fbc_lam,
+-        embed_dim=args.embed_dim,
+-        gbp_groups=args.gbp_groups,
+-        dropout=args.dropout,
+-        assemble=args.assemble,
+-    ).to(device)
+-
+-    opt_model = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
++    if args.model == "backbone":
++        model = BackboneNet(
++            num_classes=args.num_classes,
++            embed_dim=args.embed_dim,
++            dropout=args.dropout,
++        ).to(device)
++        model.input_mode = args.input_mode
++    elif args.model == "gbcnn":
++        model = GBCNN(
++            num_classes=args.num_classes,
++            gbp_groups=args.gbp_groups,
++            embed_dim=args.embed_dim,
++            dropout=args.dropout,
++        ).to(device)
++        model.input_mode = "dual"
++    else:
++        model = CPINetP1(
++            num_classes=args.num_classes,
++            fuse_ch=args.fuse_ch,
++            fbc_k=args.fbc_k,
++            fbc_lam=args.fbc_lam,
++            embed_dim=args.embed_dim,
++            gbp_groups=args.gbp_groups,
++            dropout=args.dropout,
++            assemble=args.assemble,
++            fusion=args.fusion,
++            attention=args.attention,
++            pooling=args.pooling,
++            share_head=(not args.no_share_head),
++            db34_source=args.db34_source,
++        ).to(device)
++        model.input_mode = args.input_mode
++
++    if args.optimizer == "adamw":
++        opt_model = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
++    else:
++        opt_model = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wd, momentum=args.momentum)
+ 
+     # GradNorm weights
+     w = None
+     opt_w = None
+     init_losses = None
+-    if args.loss_balance == "gradnorm":
++    if args.loss_balance == "gradnorm" and len(model.branch_names) > 1:
+         w = torch.nn.Parameter(torch.ones(len(model.branch_names), device=device))
+         opt_w = torch.optim.Adam([w], lr=1e-3)  # small lr for weights
+ 
+     best = -1.0
+     best_path = run_dir / "best.pt"
++    history_path = run_dir / "history.csv"
++    with open(history_path, "w", encoding="utf-8") as f:
++        headers = [
++            "epoch",
++            "train_loss",
++            "val_loss",
++            "val_acc",
++            "val_macro_f1",
++        ] + [f"loss_{b}" for b in model.branch_names]
++        if w is not None:
++            headers += [f"w_{b}" for b in model.branch_names]
++            headers += [f"ratio_{b}" for b in model.branch_names]
++        f.write(",".join(headers) + "\n")
+ 
+     for epoch in range(1, args.epochs + 1):
+         tr_loss, tr_logs, init_losses = train_one_epoch(
+             model=model,
+             loader=dl_tr,
+             device=device,
+             opt_model=opt_model,
+             loss_balance=args.loss_balance,
+             gradnorm_alpha=args.gradnorm_alpha,
+             opt_w=opt_w,
+             w=w,
+             init_losses=init_losses,
+             label_smoothing=args.label_smoothing,
+         )
+ 
+         va = evaluate(model, dl_va, device=device, num_classes=args.num_classes)
+ 
+         # save
+         if va["acc"] > best:
+             best = va["acc"]
+-            torch.save({"model": model.state_dict(), "acc": best, "epoch": epoch}, best_path)
++            torch.save(
++                {"model": model.state_dict(), "acc": best, "epoch": epoch, "args": vars(args)},
++                best_path
++            )
+ 
+         # simple log to stdout
+         w_str = ""
+         if w is not None:
+             w_str = " w=" + ",".join([f"{float(x):.3f}" for x in w.detach().cpu().tolist()])
+         print(f"[{epoch:03d}/{args.epochs}] tr_loss={tr_loss:.4f} va_loss={va['loss']:.4f} va_acc={va['acc']:.4f} va_macro_f1={va['macro_f1']:.4f}{w_str}")
++        ratios = None
++        if w is not None:
++            losses = torch.tensor([tr_logs[f"loss_{b}"] for b in model.branch_names])
++            ratios = (losses / (init_losses + 1e-12)).tolist() if init_losses is not None else [0.0] * len(model.branch_names)
++
++        with open(history_path, "a", encoding="utf-8") as f:
++            row = [
++                str(epoch),
++                f"{tr_loss:.6f}",
++                f"{va['loss']:.6f}",
++                f"{va['acc']:.6f}",
++                f"{va['macro_f1']:.6f}",
++            ] + [f"{tr_logs[f'loss_{b}']:.6f}" for b in model.branch_names]
++            if w is not None:
++                row += [f"{float(x):.6f}" for x in w.detach().cpu().tolist()]
++                row += [f"{float(x):.6f}" for x in ratios]
++            f.write(",".join(row) + "\n")
+ 
+     print(f"Best val acc={best:.4f}  checkpoint={best_path}")
+ 
+     # optional test
+     if args.test_csv:
+         ds_te = DualPolCSVDataset(args.test_csv, label2id, img_size=args.imgsz, aug=AugCfg(enable=False))
+         dl_te = DataLoader(ds_te, batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True)
+         ckpt = torch.load(best_path, map_location=device)
+         model.load_state_dict(ckpt["model"], strict=True)
+         te = evaluate(model, dl_te, device=device, num_classes=args.num_classes)
+         print(f"Test: loss={te['loss']:.4f} acc={te['acc']:.4f} macro_f1={te['macro_f1']:.4f}")
+         if args.save_json:
+             import json
+             metrics = {
+                 "seed": int(args.seed),
+                 "best_val_acc": float(best),
+                 "test": {k: (float(v) if isinstance(v,(int,float)) else v) for k,v in te.items()},
+                 "args": vars(args),
+             }
+             with open(run_dir / "metrics.json", "w", encoding="utf-8") as f:
+                 json.dump(metrics, f, ensure_ascii=False, indent=2)
+ 
+ 
+ if __name__ == "__main__":
+-    main()
+\ No newline at end of file
++    main()

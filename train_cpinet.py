@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from dualpol_dataset import DualPolCSVDataset, AugCfg
 from models.cpinet_p1 import CPINetP1
+from models.cpinet_baselines import BackboneNet, GBCNN
 from utils_metrics import top1_accuracy, confusion_matrix, per_class_prf
 
 
@@ -35,6 +36,14 @@ def ce_loss(logits: torch.Tensor, y: torch.Tensor, label_smoothing: float = 0.0)
     return F.cross_entropy(logits, y, label_smoothing=label_smoothing)
 
 
+def _run_model(model: torch.nn.Module, x_vh: torch.Tensor, x_vv: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    if getattr(model, "input_mode", "dual") == "vh":
+        return model(x_vh)
+    if getattr(model, "input_mode", "dual") == "vv":
+        return model(x_vv)
+    return model(x_vh, x_vv)
+
+
 @torch.no_grad()
 def evaluate(model: torch.nn.Module, loader: DataLoader, device: str, num_classes: int) -> Dict[str, float]:
     model.eval()
@@ -45,7 +54,7 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: str, num_classe
         x_vv = x_vv.to(device)
         x_vh = x_vh.to(device)
         y = y.to(device)
-        logits, aux = model(x_vh, x_vv)
+        logits, aux = _run_model(model, x_vh, x_vv)
         loss = F.cross_entropy(logits, y)
         total_loss += float(loss.item()) * y.size(0)
         n += y.size(0)
@@ -68,7 +77,7 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: str, num_classe
 
 
 def train_one_epoch(
-    model: CPINetP1,
+    model: torch.nn.Module,
     loader: DataLoader,
     device: str,
     opt_model: torch.optim.Optimizer,
@@ -89,10 +98,10 @@ def train_one_epoch(
         x_vh = x_vh.to(device)
         y = y.to(device)
 
-        logits, aux = model(x_vh, x_vv)
+        logits, aux = _run_model(model, x_vh, x_vv)
         losses = torch.stack([ce_loss(aux[b], y, label_smoothing) for b in model.branch_names])  # (4,)
 
-        if loss_balance == "sum":
+        if loss_balance == "sum" or len(model.branch_names) == 1:
             loss_total = losses.sum()
             opt_model.zero_grad(set_to_none=True)
             loss_total.backward()
@@ -168,7 +177,7 @@ def main():
     ap.add_argument("--run_dir", type=str, default=None, help="Optional explicit run directory (for repeated splits).")
     ap.add_argument("--save_json", action="store_true", help="Save final metrics to metrics.json in run_dir.")
     ap.add_argument("--epochs", type=int, default=300)
-    ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--imgsz", type=int, default=64)
     ap.add_argument("--num_classes", type=int, default=3)
@@ -184,11 +193,20 @@ def main():
     ap.add_argument("--fuse_ch", type=int, default=128)
     ap.add_argument("--embed_dim", type=int, default=1024)
     ap.add_argument("--gbp_groups", type=int, default=3)
-    ap.add_argument("--dropout", type=float, default=0.0)
+    ap.add_argument("--dropout", type=float, default=0.2)
     ap.add_argument("--assemble", type=str, default="logit_mean", choices=["logit_mean", "prob_mean"])
+    ap.add_argument("--fusion", type=str, default="imdff", choices=["imdff", "msdff"])
+    ap.add_argument("--attention", type=str, default="mose", choices=["mose", "se", "cbam", "none"])
+    ap.add_argument("--pooling", type=str, default="fbc", choices=["fbc", "gbp"])
+    ap.add_argument("--no_share_head", action="store_true", help="Disable shared head (default uses shared head).")
+    ap.add_argument("--db34_source", type=str, default="fms", choices=["fms", "db4p"])
+    ap.add_argument("--model", type=str, default="cpinet", choices=["cpinet", "backbone", "gbcnn"])
+    ap.add_argument("--input_mode", type=str, default="dual", choices=["dual", "vh", "vv"])
 
-    ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--wd", type=float, default=1e-2)
+    ap.add_argument("--optimizer", type=str, default="sgd", choices=["sgd", "adamw"])
+    ap.add_argument("--lr", type=float, default=0.01)
+    ap.add_argument("--wd", type=float, default=5e-4)
+    ap.add_argument("--momentum", type=float, default=0.9)
     ap.add_argument("--device", type=str, default="cuda:0")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--no_aug", action="store_true")
@@ -221,29 +239,67 @@ def main():
 
     dl_va = DataLoader(ds_va, batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True)
 
-    model = CPINetP1(
-        num_classes=args.num_classes,
-        fuse_ch=args.fuse_ch,
-        fbc_k=args.fbc_k,
-        fbc_lam=args.fbc_lam,
-        embed_dim=args.embed_dim,
-        gbp_groups=args.gbp_groups,
-        dropout=args.dropout,
-        assemble=args.assemble,
-    ).to(device)
+    if args.model == "backbone":
+        model = BackboneNet(
+            num_classes=args.num_classes,
+            embed_dim=args.embed_dim,
+            dropout=args.dropout,
+        ).to(device)
+        model.input_mode = args.input_mode
+    elif args.model == "gbcnn":
+        model = GBCNN(
+            num_classes=args.num_classes,
+            gbp_groups=args.gbp_groups,
+            embed_dim=args.embed_dim,
+            dropout=args.dropout,
+        ).to(device)
+        model.input_mode = "dual"
+    else:
+        model = CPINetP1(
+            num_classes=args.num_classes,
+            fuse_ch=args.fuse_ch,
+            fbc_k=args.fbc_k,
+            fbc_lam=args.fbc_lam,
+            embed_dim=args.embed_dim,
+            gbp_groups=args.gbp_groups,
+            dropout=args.dropout,
+            assemble=args.assemble,
+            fusion=args.fusion,
+            attention=args.attention,
+            pooling=args.pooling,
+            share_head=(not args.no_share_head),
+            db34_source=args.db34_source,
+        ).to(device)
+        model.input_mode = args.input_mode
 
-    opt_model = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    if args.optimizer == "adamw":
+        opt_model = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    else:
+        opt_model = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wd, momentum=args.momentum)
 
     # GradNorm weights
     w = None
     opt_w = None
     init_losses = None
-    if args.loss_balance == "gradnorm":
+    if args.loss_balance == "gradnorm" and len(model.branch_names) > 1:
         w = torch.nn.Parameter(torch.ones(len(model.branch_names), device=device))
         opt_w = torch.optim.Adam([w], lr=1e-3)  # small lr for weights
 
     best = -1.0
     best_path = run_dir / "best.pt"
+    history_path = run_dir / "history.csv"
+    with open(history_path, "w", encoding="utf-8") as f:
+        headers = [
+            "epoch",
+            "train_loss",
+            "val_loss",
+            "val_acc",
+            "val_macro_f1",
+        ] + [f"loss_{b}" for b in model.branch_names]
+        if w is not None:
+            headers += [f"w_{b}" for b in model.branch_names]
+            headers += [f"ratio_{b}" for b in model.branch_names]
+        f.write(",".join(headers) + "\n")
 
     for epoch in range(1, args.epochs + 1):
         tr_loss, tr_logs, init_losses = train_one_epoch(
@@ -264,13 +320,33 @@ def main():
         # save
         if va["acc"] > best:
             best = va["acc"]
-            torch.save({"model": model.state_dict(), "acc": best, "epoch": epoch}, best_path)
+            torch.save(
+                {"model": model.state_dict(), "acc": best, "epoch": epoch, "args": vars(args)},
+                best_path
+            )
 
         # simple log to stdout
         w_str = ""
         if w is not None:
             w_str = " w=" + ",".join([f"{float(x):.3f}" for x in w.detach().cpu().tolist()])
         print(f"[{epoch:03d}/{args.epochs}] tr_loss={tr_loss:.4f} va_loss={va['loss']:.4f} va_acc={va['acc']:.4f} va_macro_f1={va['macro_f1']:.4f}{w_str}")
+        ratios = None
+        if w is not None:
+            losses = torch.tensor([tr_logs[f"loss_{b}"] for b in model.branch_names])
+            ratios = (losses / (init_losses + 1e-12)).tolist() if init_losses is not None else [0.0] * len(model.branch_names)
+
+        with open(history_path, "a", encoding="utf-8") as f:
+            row = [
+                str(epoch),
+                f"{tr_loss:.6f}",
+                f"{va['loss']:.6f}",
+                f"{va['acc']:.6f}",
+                f"{va['macro_f1']:.6f}",
+            ] + [f"{tr_logs[f'loss_{b}']:.6f}" for b in model.branch_names]
+            if w is not None:
+                row += [f"{float(x):.6f}" for x in w.detach().cpu().tolist()]
+                row += [f"{float(x):.6f}" for x in ratios]
+            f.write(",".join(row) + "\n")
 
     print(f"Best val acc={best:.4f}  checkpoint={best_path}")
 
